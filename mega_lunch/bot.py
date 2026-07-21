@@ -17,6 +17,11 @@ from .source import MenuSourceError
 
 log = logging.getLogger(__name__)
 
+NEXT_WEEK_NOT_PUBLISHED_MESSAGE = (
+    "🍚 다음 주 식단표가 아직 올라오지 않았어요.\n"
+    "보통 **금요일**에 게시되니 조금 뒤에 다시 확인해 주세요!"
+)
+
 
 class MegaLunchBot(commands.Bot):
     def __init__(self, settings: Settings):
@@ -55,7 +60,13 @@ def register_commands(bot: MegaLunchBot) -> None:
 
     @bot.tree.command(name="다음주", description="다음 주 전체 식단표를 보여줍니다.")
     async def next_week(interaction: discord.Interaction) -> None:
-        await _send_week(interaction, bot.menu_service, relative_week(_today(), 1), "다음 주")
+        await _send_week(
+            interaction,
+            bot.menu_service,
+            relative_week(_today(), 1),
+            "다음 주",
+            not_published_message=NEXT_WEEK_NOT_PUBLISHED_MESSAGE,
+        )
 
 
 def _today() -> dt.date:
@@ -104,12 +115,15 @@ async def _send_week(
     service: MenuService,
     week: WeekKey,
     label: str,
+    not_published_message: str | None = None,
 ) -> None:
     await interaction.response.defer(thinking=True)
     try:
         menu = await service.get(week)
         await _send_full_image(interaction, menu, label)
-    except (MenuNotPublished, MenuSourceError, MenuImageError) as exc:
+    except MenuNotPublished as exc:
+        await interaction.followup.send(not_published_message or f"⚠️ {exc}")
+    except (MenuSourceError, MenuImageError) as exc:
         await _send_known_error(interaction, exc)
     except Exception:
         log.exception("주간 메뉴 전송 실패")
