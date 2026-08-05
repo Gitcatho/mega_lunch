@@ -16,7 +16,15 @@ from .settings import Settings
 
 
 log = logging.getLogger(__name__)
-CACHE_FORMAT_VERSION = 1
+CACHE_FORMAT_VERSION = 2
+
+# 식단표에서 날짜 행과 점심(Self) 영역을 구분하는 긴 가로선을 찾기 위한 범위.
+# 주간 이미지의 위쪽 여백은 달라질 수 있지만 표 디자인과 행 비율은 일정하다.
+TOP_RULE_SEARCH_RANGE = (0.18, 0.28)
+BOTTOM_RULE_SEARCH_RANGE = (0.40, 0.56)
+HORIZONTAL_RULE_DARK_THRESHOLD = 110
+HORIZONTAL_RULE_MIN_COVERAGE = 0.72
+NEARBY_RULE_GAP = 15
 
 
 class MenuImageError(RuntimeError):
@@ -159,8 +167,7 @@ class MenuCache:
 
     def _crop_day(self, source: Image.Image, weekday: int) -> Image.Image:
         width, height = source.size
-        top = round(height * self.settings.crop_top)
-        bottom = top + round(height * self.settings.crop_height)
+        top, bottom = self._lunch_vertical_bounds(source)
         table_left = width * self.settings.crop_left
         column_width = width * self.settings.crop_width / 5
         left = round(table_left + column_width * weekday)
@@ -182,6 +189,72 @@ class MenuCache:
         sharpened = resized.filter(ImageFilter.UnsharpMask(radius=1.2, percent=90, threshold=2))
         resized.close()
         return sharpened
+
+    def _lunch_vertical_bounds(self, source: Image.Image) -> tuple[int, int]:
+        """날짜 행 시작부터 Take-Out 행 직전까지의 세로 경계를 찾는다."""
+        height = source.height
+        fallback_top = round(height * self.settings.crop_top)
+        fallback_bottom = fallback_top + round(height * self.settings.crop_height)
+
+        rules = self._horizontal_rules(source)
+        top_candidates = [
+            y
+            for y in rules
+            if height * TOP_RULE_SEARCH_RANGE[0] <= y <= height * TOP_RULE_SEARCH_RANGE[1]
+        ]
+        bottom_candidates = [
+            y
+            for y in rules
+            if height * BOTTOM_RULE_SEARCH_RANGE[0] <= y <= height * BOTTOM_RULE_SEARCH_RANGE[1]
+        ]
+
+        if not top_candidates or not bottom_candidates:
+            log.warning("식단표 가로선 검출 실패 — 설정된 크롭 비율을 사용합니다.")
+            return fallback_top, fallback_bottom
+
+        # 상단 배너의 아래 선과 표의 시작 선은 6~10px 간격으로 붙어 있다.
+        # 첫 번째 선과 가까운 후보 중 마지막 선이 실제 날짜 행 시작점이다.
+        first_top = min(top_candidates)
+        top = max(y for y in top_candidates if y - first_top <= NEARBY_RULE_GAP)
+
+        # 점심 영역 아래에는 Take-Out, 도시락 순서로 경계선이 나타난다.
+        # 탐색 범위에서 첫 번째 선이 점심 영역의 끝이다.
+        bottom = min(bottom_candidates)
+
+        if top >= bottom:
+            log.warning("식단표 가로선 순서가 올바르지 않음 — 설정된 크롭 비율을 사용합니다.")
+            return fallback_top, fallback_bottom
+        return top, bottom
+
+    def _horizontal_rules(self, source: Image.Image) -> list[int]:
+        """메뉴 열 폭의 대부분을 가로지르는 어두운 수평선의 y 좌표를 반환한다."""
+        width, height = source.size
+        x_start = max(0, round(width * self.settings.crop_left))
+        x_end = min(width, round(width * (self.settings.crop_left + self.settings.crop_width)))
+        scan_width = x_end - x_start
+        minimum_dark_pixels = round(scan_width * HORIZONTAL_RULE_MIN_COVERAGE)
+
+        grayscale = source.convert("L")
+        try:
+            matching_rows: list[int] = []
+            search_start = round(height * TOP_RULE_SEARCH_RANGE[0])
+            search_end = round(height * BOTTOM_RULE_SEARCH_RANGE[1])
+            for y in range(search_start, search_end + 1):
+                histogram = grayscale.crop((x_start, y, x_end, y + 1)).histogram()
+                dark_pixels = sum(histogram[:HORIZONTAL_RULE_DARK_THRESHOLD])
+                if dark_pixels >= minimum_dark_pixels:
+                    matching_rows.append(y)
+        finally:
+            grayscale.close()
+
+        # JPEG 압축이나 두꺼운 테두리 때문에 연속 검출된 행은 하나로 합친다.
+        rules: list[int] = []
+        previous_y: int | None = None
+        for y in matching_rows:
+            if previous_y is None or y > previous_y + 1:
+                rules.append(y)
+            previous_y = y
+        return rules
 
     def _week_dir(self, week: WeekKey) -> Path:
         return self.settings.cache_dir / str(week)
