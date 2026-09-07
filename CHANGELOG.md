@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Preload the following week's menu every Saturday at 9:00 AM KST so the first command can use the prepared cache. Prefetch failures are logged without interrupting the bot. (commit: b83f1fa)
+
 ### Fixed (Bug Fixes)
 
 - Detect menu table boundaries so day images remain aligned when the weekly image shifts vertically and exclude the Take-Out section, with configured crop ratios as a fallback. (commit: 78a97c2)
