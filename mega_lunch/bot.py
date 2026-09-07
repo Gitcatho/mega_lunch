@@ -5,11 +5,12 @@ import logging
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from .cache import MenuImageError
 from .calendar import WEEKDAY_NAMES, WeekKey, is_serving_day, relative_day, relative_week
 from .models import CachedMenu
+from .prefetch import PREFETCH_TIME, scheduled_prefetch_week
 from .service import MenuNotPublished, MenuService
 from .settings import KST, Settings
 from .source import MenuSourceError
@@ -39,10 +40,33 @@ class MegaLunchBot(commands.Bot):
         register_commands(self)
         synced = await self.tree.sync()
         log.info("슬래시 명령어 %d개 동기화 완료", len(synced))
+        self.prefetch_next_week.start()
+
+    async def close(self) -> None:
+        self.prefetch_next_week.cancel()
+        await super().close()
 
     async def on_ready(self) -> None:
         log.info("로그인 완료: %s", self.user)
         await self.change_presence(activity=discord.Game(name="/오늘점심"))
+
+    @tasks.loop(time=PREFETCH_TIME)
+    async def prefetch_next_week(self) -> None:
+        week = scheduled_prefetch_week(_today())
+        if week is None:
+            return
+
+        try:
+            await self.menu_service.get(week)
+            log.info("다음 주 식단표 사전 캐시 완료: %s", week)
+        except (MenuNotPublished, MenuSourceError, MenuImageError) as exc:
+            log.warning("다음 주 식단표 사전 캐시 실패: %s", exc)
+        except Exception:
+            log.exception("다음 주 식단표 사전 캐시 중 예상하지 못한 오류 발생")
+
+    @prefetch_next_week.before_loop
+    async def before_prefetch_next_week(self) -> None:
+        await self.wait_until_ready()
 
 
 def register_commands(bot: MegaLunchBot) -> None:
